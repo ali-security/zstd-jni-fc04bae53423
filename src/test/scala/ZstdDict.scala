@@ -759,4 +759,73 @@ class ZstdDictSpec extends AnyFlatSpec {
     ddict.close
     assert(input.toSeq == decompressed.toSeq)
   }
+
+  val trainSampleSize = 1024
+  val trainSamplesCount = 512
+
+  def directTrainingSamples(): ByteBuffer = {
+    val samples = ByteBuffer.allocateDirect(trainSampleSize * trainSamplesCount)
+    samples.put(input, 0, samples.capacity)
+    samples.flip()
+    samples
+  }
+
+  for (legacy <- legacyS) {
+    "Zstd" should s"train a dict from sample sizes filling the direct samples buffer with legacy $legacy" in {
+      val samples = directTrainingSamples()
+      val sizes = Array.fill(trainSamplesCount)(trainSampleSize)
+      val dictBuffer = ByteBuffer.allocateDirect(32 * trainSamplesCount)
+      val result = Zstd.trainFromBufferDirect(samples, sizes, dictBuffer, legacy)
+      assert(!Zstd.isError(result))
+      assert(result > 0)
+    }
+
+    it should s"reject sample sizes reading past the direct samples buffer with legacy $legacy" in {
+      // the samples buffer is a small view on a larger allocation holding valid training data,
+      // without the capacity check the trainer reads past the end of the view and builds a dict
+      val backing = directTrainingSamples()
+      backing.limit(trainSampleSize)
+      val samples = backing.slice()
+      assert(samples.capacity == trainSampleSize)
+      val sizes = Array.fill(trainSamplesCount)(trainSampleSize)
+      val dictBuffer = ByteBuffer.allocateDirect(32 * trainSamplesCount)
+      val result = Zstd.trainFromBufferDirect(samples, sizes, dictBuffer, legacy)
+      assert(Zstd.isError(result))
+    }
+
+    it should s"reject negative sample sizes with legacy $legacy" in {
+      val samples = directTrainingSamples()
+      val sizes = Array.fill(trainSamplesCount)(trainSampleSize)
+      sizes(0) = 3 * trainSampleSize
+      sizes(1) = -trainSampleSize
+      // the total still matches the buffer capacity, only the negative size is invalid
+      assert(sizes.sum == samples.capacity)
+      val dictBuffer = ByteBuffer.allocateDirect(32 * trainSamplesCount)
+      val result = Zstd.trainFromBufferDirect(samples, sizes, dictBuffer, legacy)
+      assert(Zstd.isError(result))
+    }
+
+    it should s"reject sample sizes whose total overflows 32 bits with legacy $legacy" in {
+      val samples = directTrainingSamples()
+      val sizes = Array.fill(trainSamplesCount)(0)
+      // 2 * Int.MaxValue + 2 == 2^32, which wraps around to 0 in a 32-bit size_t
+      sizes(0) = Int.MaxValue
+      sizes(1) = Int.MaxValue
+      sizes(2) = 2
+      val dictBuffer = ByteBuffer.allocateDirect(32 * trainSamplesCount)
+      val result = Zstd.trainFromBufferDirect(samples, sizes, dictBuffer, legacy)
+      assert(Zstd.isError(result))
+    }
+
+    it should s"reject non-direct samples or dict buffers with legacy $legacy" in {
+      val sizes = Array.fill(trainSamplesCount)(trainSampleSize)
+      val heapSamples = ByteBuffer.allocate(trainSampleSize * trainSamplesCount)
+      heapSamples.put(input, 0, heapSamples.capacity)
+      heapSamples.flip()
+      val heapResult = Zstd.trainFromBufferDirect(heapSamples, sizes, ByteBuffer.allocateDirect(32 * trainSamplesCount), legacy)
+      assert(Zstd.isError(heapResult))
+      val heapDictResult = Zstd.trainFromBufferDirect(directTrainingSamples(), sizes, ByteBuffer.allocate(32 * trainSamplesCount), legacy)
+      assert(Zstd.isError(heapDictResult))
+    }
+  }
 }

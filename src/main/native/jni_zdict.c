@@ -58,10 +58,12 @@ E1: return size;
 JNIEXPORT jlong Java_com_github_luben_zstd_Zstd_trainFromBufferDirect0
   (JNIEnv *env, jclass obj, jobject samples, jintArray sampleSizes, jobject dictBuffer, jboolean legacy) {
 
-    size_t size = 0;
+    size_t size = -ZSTD_error_memory_allocation;
     void *samples_buffer = (*env)->GetDirectBufferAddress(env, samples);
+    size_t samples_capacity = (*env)->GetDirectBufferCapacity(env, samples);
     void *dict_buff = (*env)->GetDirectBufferAddress(env, dictBuffer);
     size_t dict_capacity = (*env)->GetDirectBufferCapacity(env, dictBuffer);
+    if (samples_buffer == NULL || dict_buff == NULL) goto E1;
 
     /* convert sized from int to size_t */
     jsize num_samples = (*env)->GetArrayLength(env, sampleSizes);
@@ -73,10 +75,22 @@ JNIEXPORT jlong Java_com_github_luben_zstd_Zstd_trainFromBufferDirect0
     }
     jint *sample_sizes_array = (*env)->GetPrimitiveArrayCritical(env, sampleSizes, NULL);
     if (sample_sizes_array == NULL) goto E2;
+    size_t total_samples_size = 0;
     for (int i = 0; i < num_samples; i++) {
+        if (sample_sizes_array[i] < 0) {
+            (*env)->ReleasePrimitiveArrayCritical(env, sampleSizes, sample_sizes_array, JNI_ABORT);
+            goto E2;
+        }
+        total_samples_size += (size_t) sample_sizes_array[i];
+        /* checked on every step so that the total cannot wrap around a 32-bit size_t */
+        if (total_samples_size > samples_capacity) {
+            (*env)->ReleasePrimitiveArrayCritical(env, sampleSizes, sample_sizes_array, JNI_ABORT);
+            goto E2;
+        }
         samples_sizes[i] = sample_sizes_array[i];
     }
     (*env)->ReleasePrimitiveArrayCritical(env, sampleSizes, sample_sizes_array, JNI_ABORT);
+    if (total_samples_size > samples_capacity) goto E2;
 
     if (legacy == JNI_TRUE) {
         ZDICT_legacy_params_t params;
