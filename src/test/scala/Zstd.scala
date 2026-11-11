@@ -922,6 +922,130 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
     }
   }
 
+  "ZstdOutputStream" should s"throw on setting checksum on closed stream" in {
+    val os  = new ByteArrayOutputStream(100)
+    val zos = new ZstdOutputStreamNoFinalizer(os, 1)
+    zos.setCloseFrameOnFlush(true)
+    zos.write("foo".toArray.map(_.toByte))
+    // closes the frame, so the closed stream does not report a frame in progress
+    zos.flush()
+    zos.close()
+    assertThrows[IOException] {
+      zos.setChecksum(true)
+    }
+  }
+
+  "ZstdOutputStream" should s"throw on setting any parameter on closed stream" in {
+    val os  = new ByteArrayOutputStream(100)
+    val zos = new ZstdOutputStreamNoFinalizer(os, 1)
+    zos.setCloseFrameOnFlush(true)
+    zos.write("foo".toArray.map(_.toByte))
+    // closes the frame, so the setters would reach the freed native context
+    zos.flush()
+    zos.close()
+    val cdict = new ZstdDictCompress(Array.fill[Byte](1024)(1), 1)
+    val setters: List[(String, ZstdOutputStreamNoFinalizer => Any)] = List(
+      ("setLevel", _.setLevel(3)),
+      ("setLong", _.setLong(20)),
+      ("setWorkers", _.setWorkers(0)),
+      ("setOverlapLog", _.setOverlapLog(0)),
+      ("setJobSize", _.setJobSize(0)),
+      ("setTargetLength", _.setTargetLength(0)),
+      ("setMinMatch", _.setMinMatch(4)),
+      ("setSearchLog", _.setSearchLog(1)),
+      ("setChainLog", _.setChainLog(6)),
+      ("setHashLog", _.setHashLog(6)),
+      ("setWindowLog", _.setWindowLog(20)),
+      ("setStrategy", _.setStrategy(1)),
+      ("setDict(byte[])", _.setDict(Array.fill[Byte](1024)(1))),
+      ("setDict(ZstdDictCompress)", _.setDict(cdict))
+    )
+    for ((name, setter) <- setters) {
+      val e = intercept[IOException] {
+        setter(zos)
+      }
+      assert(e.getMessage == "StreamClosed", s"$name on a closed stream")
+    }
+    // the closed stream did not retain the dictionary
+    cdict.close()
+  }
+
+  "ZstdInputStream" should s"throw on setting any parameter on closed stream" in {
+    val zis = new ZstdInputStreamNoFinalizer(new ByteArrayInputStream(Array[Byte]()))
+    zis.close()
+    val ddict = new ZstdDictDecompress(Array.fill[Byte](1024)(1))
+    val setters: List[(String, ZstdInputStreamNoFinalizer => Any)] = List(
+      ("setDict(byte[])", _.setDict(Array.fill[Byte](1024)(1))),
+      ("setDict(ZstdDictDecompress)", _.setDict(ddict)),
+      ("setLongMax", _.setLongMax(20)),
+      ("setRefMultipleDDicts", _.setRefMultipleDDicts(true))
+    )
+    for ((name, setter) <- setters) {
+      val e = intercept[IOException] {
+        setter(zis)
+      }
+      assert(e.getMessage == "Stream closed", s"$name on a closed stream")
+    }
+    // the closed stream did not retain the dictionary
+    ddict.close()
+  }
+
+  "ZstdInputStream" should s"not touch another stream's native context through the setters of a closed stream" in {
+    val input = Array.tabulate[Byte](1 << 20)(i => (i % 251).toByte)
+    val compressed = Zstd.compress(input, 1)
+    // A is closed, so its native context is freed and may be reused by B
+    val a = new ZstdInputStreamNoFinalizer(new ByteArrayInputStream(compressed))
+    a.close()
+    val b = new ZstdInputStreamNoFinalizer(new ByteArrayInputStream(compressed))
+    val output = new Array[Byte](input.length)
+    // advance B into an active streaming state
+    var pos = b.read(output, 0, 16)
+    assert(pos > 0)
+    // calling the setters on the stale A must not reach the native code
+    for (setter <- List[ZstdInputStreamNoFinalizer => Any](
+      _.setDict(Array.fill[Byte](1024)(1)), _.setLongMax(20), _.setRefMultipleDDicts(true))) {
+      val e = intercept[IOException] {
+        setter(a)
+      }
+      assert(e.getMessage == "Stream closed")
+    }
+    // B was not corrupted and decompresses the rest of the frame
+    while (pos < input.length) {
+      val read = b.read(output, pos, input.length - pos)
+      assert(read > 0)
+      pos += read
+    }
+    b.close()
+    assert(java.util.Arrays.equals(input, output))
+  }
+
+  "ZstdBufferDecompressingStream" should s"throw on setting any parameter on closed stream" in {
+    val compressed = Zstd.compress(Array.fill[Byte](100)(1), 1)
+    val ddict = new ZstdDictDecompress(Array.fill[Byte](1024)(1))
+    val heapStream = new ZstdBufferDecompressingStreamNoFinalizer(ByteBuffer.wrap(compressed))
+    val direct = ByteBuffer.allocateDirect(compressed.length)
+    direct.put(compressed)
+    direct.flip()
+    val directStream = new ZstdDirectBufferDecompressingStreamNoFinalizer(direct)
+    for (zis <- List[BaseZstdBufferDecompressingStreamNoFinalizer](heapStream, directStream)) {
+      zis.close()
+      assert(!zis.hasRemaining)
+      val setters: List[(String, BaseZstdBufferDecompressingStreamNoFinalizer => Any)] = List(
+        ("setDict(byte[])", _.setDict(Array.fill[Byte](1024)(1))),
+        ("setDict(ZstdDictDecompress)", _.setDict(ddict)),
+        ("setLongMax", _.setLongMax(20))
+      )
+      for ((name, setter) <- setters) {
+        val e = intercept[IOException] {
+          setter(zis)
+        }
+        assert(e.getMessage == "Stream closed", s"$name on a closed ${zis.getClass.getSimpleName}")
+      }
+    }
+    // the closed streams did not retain the dictionary
+    ddict.close()
+  }
+
   "ZstdDirectBufferCompressingStream" should s"do nothing on double close but throw on writing on closed stream" in {
     val os  = ByteBuffer.allocateDirect(100)
     val zos = new ZstdDirectBufferCompressingStream(os, 1)
