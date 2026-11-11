@@ -1601,4 +1601,17 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
       }
     }.get
   }
+
+  "Zstd.decompressedSize" should "reject a negative or overflowing source range" in {
+    val buf = Zstd.compress("hello zstd".getBytes)
+    intercept[ArrayIndexOutOfBoundsException] {
+      Zstd.decompressedSize(buf, -1, buf.length, false)
+    }
+    intercept[ArrayIndexOutOfBoundsException] {
+      Zstd.decompressedSize(buf, 0, -1, false)
+    }
+    intercept[ArrayIndexOutOfBoundsException] {
+      Zstd.decompressedSize(buf, 1, Int.MaxValue, false)
+    }
+  }
 }
