@@ -428,4 +428,42 @@ class ZstdDictSpec extends AnyFlatSpec {
       assert(input.toSeq == output.toSeq)
     }
   }
+
+  val boundsDict = input.slice(0, 16 * 1024)
+  val invalidDictRanges = List(
+    (boundsDict.length - 10, boundsDict.length),   // reads past the end of the array
+    (-1, boundsDict.length),                       // negative offset reads before the array
+    (-1024, 16),                                   // negative offset with a small length
+    (0, -1),                                       // negative length
+    (0, boundsDict.length + 1),                    // length larger than the array
+    (1, Int.MaxValue),                             // overflowing offset + length
+    (boundsDict.length + 1, 0),                    // offset past the end of the array
+    (Int.MaxValue, 1)                              // overflowing offset
+  )
+
+  for ((offset, length) <- invalidDictRanges) {
+    "ZstdDictCompress" should s"reject out of bounds dictionary range offset=$offset length=$length" in {
+      intercept[IllegalArgumentException] {
+        new ZstdDictCompress(boundsDict, offset, length, 1)
+      }
+    }
+
+    "ZstdDictDecompress" should s"reject out of bounds dictionary range offset=$offset length=$length" in {
+      intercept[IllegalArgumentException] {
+        new ZstdDictDecompress(boundsDict, offset, length)
+      }
+    }
+  }
+
+  "ZstdDict" should "round-trip with a dictionary at an offset filling the rest of the buffer" in {
+    val prefix = 7
+    val buffer = Array.fill[Byte](prefix)(0) ++ boundsDict
+    val cdict = new ZstdDictCompress(buffer, prefix, buffer.length - prefix, 1)
+    val compressed = Zstd.compress(input, cdict)
+    cdict.close
+    val ddict = new ZstdDictDecompress(buffer, prefix, buffer.length - prefix)
+    val decompressed = Zstd.decompress(compressed, ddict, input.length)
+    ddict.close
+    assert(input.toSeq == decompressed.toSeq)
+  }
 }
