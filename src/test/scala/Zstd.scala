@@ -1614,4 +1614,17 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
       Zstd.decompressedSize(buf, 1, Int.MaxValue, false)
     }
   }
+
+  "Zstd.trainFromBuffer" should "reject FASTCOVER training samples too small to train on" in {
+    val samples = Array.fill(11)(Array[Byte]())
+    val e = intercept[ZstdException] {
+      Zstd.trainFromBuffer(samples, new Array[Byte](1024), false)
+    }
+    assert(e.getMessage == "training samples too small")
+    val direct = java.nio.ByteBuffer.allocateDirect(16)
+    val e2 = intercept[ZstdException] {
+      Zstd.trainFromBufferDirect(direct, Array.fill(11)(0), java.nio.ByteBuffer.allocateDirect(1024), false)
+    }
+    assert(e2.getMessage == "training samples too small")
+  }
 }
