@@ -224,6 +224,71 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
     }
   }
 
+  it should "reject out of bounds offset and size when reading the frame size of a direct ByteBuffer" in {
+    val input = Array.tabulate[Byte](1000)(i => (i % 251).toByte)
+    val compressed = Zstd.compress(input, 1)
+    val clen = compressed.length
+
+    // in-bounds calls, including an exact fit at the end of the buffer, still work
+    val exact = ByteBuffer.allocateDirect(clen)
+    exact.put(compressed)
+    assert(Zstd.getDirectByteBufferFrameContentSize(exact, 0, clen) == input.length)
+    assert(Zstd.decompressedDirectByteBufferSize(exact, 0, clen) == input.length)
+    assert(Zstd.getDirectByteBufferFrameContentSize(exact, 0, clen, false) == input.length)
+    assert(Zstd.decompressedDirectByteBufferSize(exact, 0, clen, false) == input.length)
+
+    // valid frames start at 0 and 32 of the same native memory, just outside the
+    // small direct buffers sliced out of it below: reporting their content size
+    // means the read went past the bounds of the buffer
+    val backing = ByteBuffer.allocateDirect(64 + clen)
+    backing.put(compressed)
+    backing.position(32)
+    backing.put(compressed)
+
+    def window(from: Int, size: Int): ByteBuffer = {
+      val dup = backing.duplicate()
+      dup.limit(from + size)
+      dup.position(from)
+      dup.slice()
+    }
+
+    // negative offset: reads the frame at 0, one byte before the start of the buffer
+    val afterFirstFrame = window(1, 24)
+    // negative size: (size_t) -1 lets the read run past the 2 bytes of the buffer
+    val firstFrameMagic = window(0, 2)
+    // offset + size overflows jint and wraps to a negative value: reads the frame at 32
+    val beforeSecondFrame = window(24, 4)
+
+    val cases: List[(String, ByteBuffer, Int, Int)] = List(
+      ("negative offset", afterFirstFrame, -1, 24),
+      ("negative size", firstFrameMagic, 0, -1),
+      ("negative offset and size", afterFirstFrame, -1, -1),
+      ("offset + size overflow", beforeSecondFrame, 8, Int.MaxValue),
+      ("offset + size overflow by one", beforeSecondFrame, 8, Int.MaxValue - 7),
+      ("offset past the end", beforeSecondFrame, 5, 0),
+      ("size past the end", beforeSecondFrame, 0, 5)
+    )
+    val calls: List[(String, (ByteBuffer, Int, Int) => Long)] = List(
+      ("getDirectByteBufferFrameContentSize",
+        (b: ByteBuffer, o: Int, s: Int) => Zstd.getDirectByteBufferFrameContentSize(b, o, s)),
+      ("getDirectByteBufferFrameContentSize magicless",
+        (b: ByteBuffer, o: Int, s: Int) => Zstd.getDirectByteBufferFrameContentSize(b, o, s, true)),
+      ("decompressedDirectByteBufferSize",
+        (b: ByteBuffer, o: Int, s: Int) => Zstd.decompressedDirectByteBufferSize(b, o, s)),
+      ("decompressedDirectByteBufferSize magicless",
+        (b: ByteBuffer, o: Int, s: Int) => Zstd.decompressedDirectByteBufferSize(b, o, s, true))
+    )
+    // check every case before failing, so each out of bounds read gets reported
+    val notRejected = for {
+      (name, buf, offset, size) <- cases
+      (call, sizeOf) <- calls
+      result = sizeOf(buf, offset, size)
+      if result == input.length || !Zstd.isError(result) || Zstd.getErrorCode(result) != Zstd.errGeneric()
+    } yield s"$call with $name ($offset, $size) returned $result" +
+      (if (result == input.length) " read out of bounds" else " not rejected")
+    assert(notRejected.isEmpty, notRejected.mkString("\n", "\n", ""))
+  }
+
   for (level <- levels) {
     "ZstdInputStream" should s"should round-trip compression/decompression at level $level" in {
       forAll { input: Array[Byte] =>
