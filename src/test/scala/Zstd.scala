@@ -1636,4 +1636,17 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
     }
     zis.close()
   }
+
+  "Zstd.getFrameContentSize" should "reject a negative or overflowing source range" in {
+    val buf = Zstd.compress("hello zstd".getBytes)
+    intercept[ArrayIndexOutOfBoundsException] {
+      Zstd.getFrameContentSize(buf, -1, buf.length, false)
+    }
+    intercept[ArrayIndexOutOfBoundsException] {
+      Zstd.getFrameContentSize(buf, 0, -1, false)
+    }
+    intercept[ArrayIndexOutOfBoundsException] {
+      Zstd.getFrameContentSize(buf, 1, Int.MaxValue, false)
+    }
+  }
 }
