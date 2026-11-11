@@ -1627,4 +1627,13 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
     }
     assert(e2.getMessage == "training samples too small")
   }
+
+  "ZstdInputStream" should "reject a negative read length instead of looping" in {
+    val compressed = Zstd.compress("hello zstd".getBytes)
+    val zis = new ZstdInputStreamNoFinalizer(new java.io.ByteArrayInputStream(compressed))
+    intercept[IndexOutOfBoundsException] {
+      zis.read(new Array[Byte](16), 0, -1)
+    }
+    zis.close()
+  }
 }
