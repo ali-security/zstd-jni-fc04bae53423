@@ -45,6 +45,10 @@ public class ZstdCompressCtx extends AutoCloseBase {
                 seqprod = null;
             }
         }
+        if (compression_dict != null) {
+            compression_dict.releaseSharedLock();
+            compression_dict = null;
+        }
     }
 
     private void ensureOpen() {
@@ -398,12 +402,18 @@ public class ZstdCompressCtx extends AutoCloseBase {
         try {
             long result = loadCDictFast0(nativePtr, dict);
             if (Zstd.isError(result)) {
+                // the dictionary was not loaded, so it's not referenced by the context
+                dict.releaseSharedLock();
                 throw new ZstdException(result);
             }
+            // release the shared lock on the previously loaded dictionary (if any)
+            if (compression_dict != null) {
+                compression_dict.releaseSharedLock();
+            }
             // keep a reference to the dictionary so it's not garbage collected
+            // and keep holding its shared lock, so it can't be closed while in use
             compression_dict = dict;
         } finally {
-            dict.releaseSharedLock();
             releaseSharedLock();
         }
         return this;
@@ -423,7 +433,10 @@ public class ZstdCompressCtx extends AutoCloseBase {
             if (Zstd.isError(result)) {
                 throw new ZstdException(result);
             }
-            compression_dict = null;
+            if (compression_dict != null) {
+                compression_dict.releaseSharedLock();
+                compression_dict = null;
+            }
         } finally {
             releaseSharedLock();
         }
@@ -450,6 +463,10 @@ public class ZstdCompressCtx extends AutoCloseBase {
         long result = reset0(nativePtr);
         if (Zstd.isError(result)) {
             throw new ZstdException(result);
+        }
+        if (compression_dict != null) {
+            compression_dict.releaseSharedLock();
+            compression_dict = null;
         }
     }
     private static native long reset0(long ptr);
